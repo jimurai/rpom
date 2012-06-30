@@ -1,0 +1,3 @@
+[submodule "embedded_dsp"]
+	path = embedded_dsp
+	url = git@github.com:jimurai/embedded_dsp.git
