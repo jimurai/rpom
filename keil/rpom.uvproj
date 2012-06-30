@@ -346,7 +346,7 @@
               <MiscControls>--c99</MiscControls>
               <Define>EFM32TG210F32 DEBUG_EFM</Define>
               <Undefine></Undefine>
-              <IncludePath>..\;..\..\..\..\..\CMSIS\Include;..\..\..\..\..\Device\EnergyMicro\EFM32TG\Include;..\..\..\..\..\emlib\inc;..\..\..\drivers;..\..\..\bsp</IncludePath>
+              <IncludePath>..\;..\..\..\..\..\CMSIS\Include;..\..\..\..\..\Device\EnergyMicro\EFM32TG\Include;..\..\..\..\..\emlib\inc;..\..\..\drivers;..\..\..\bsp;..\embedded_dsp\filtering;..\embedded_dsp\segmentation</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -485,6 +485,26 @@
               <FileName>main.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\efm32\main.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>DSP</GroupName>
+          <Files>
+            <File>
+              <FileName>lwdf.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\embedded_dsp\filtering\lwdf.c</FilePath>
+            </File>
+            <File>
+              <FileName>ppg_delineator.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\embedded_dsp\segmentation\ppg_delineator.c</FilePath>
+            </File>
+            <File>
+              <FileName>quad_delineator.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\embedded_dsp\segmentation\quad_delineator.c</FilePath>
             </File>
           </Files>
         </Group>

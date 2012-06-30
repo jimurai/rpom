@@ -42,8 +42,12 @@
 #include "em_gpio.h" 
                         
 #include "trace.h"
+
 #include "bsp.h"
-#include "comms.h"  
+#include "comms.h" 
+
+#include "lwdf.h"
+#include "ppg_delineator.h"
 
 /* State variables */
 uint8_t phase;
