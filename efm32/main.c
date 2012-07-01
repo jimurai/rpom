@@ -1,37 +1,16 @@
-/**************************************************************************//**
+ /**
  * @file
- * @brief Simple LED Blink Demo for EFM32TG_STK3300
- * @author Energy Micro AS
- * @version 3.0.1
- ******************************************************************************
- * @section License
- * <b>(C) Copyright 2012 Energy Micro AS, http://www.energymicro.com</b>
- *******************************************************************************
+ * @brief Reflective Pulse Oximeter Module
  *
- * Permission is granted to anyone to use this software for any purpose,
- * including commercial applications, and to alter it and redistribute it
- * freely, subject to the following restrictions:
+ * @author James A. C. Patterson
+ * @version 0.1
+ * @date 31/05/2012
  *
- * 1. The origin of this software must not be misrepresented; you must not
- *    claim that you wrote the original software.
- * 2. Altered source versions must be plainly marked as such, and must not be
- *    misrepresented as being the original software.
- * 3. This notice may not be removed or altered from any source distribution.
- * 4. The source and compiled code may only be used on Energy Micro "EFM32"
- *    microcontrollers and "EFR4" radios.
+ * @section LICENSE
  *
- * DISCLAIMER OF WARRANTY/LIMITATION OF REMEDIES: Energy Micro AS has no
- * obligation to support this Software. Energy Micro AS is providing the
- * Software "AS IS", with no express or implied warranties of any kind,
- * including, but not limited to, any implied warranties of merchantability
- * or fitness for any particular purpose or warranties against infringement
- * of any proprietary rights of a third party.
+ * Free Beer License
  *
- * Energy Micro AS will not be liable for any consequential, incidental, or
- * special damages, or any other relief, or for any claim by any third party,
- * arising from your use of this Software.
- *
- *****************************************************************************/
+ */
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -46,7 +25,7 @@
 #include "bsp.h"
 #include "comms.h" 
 
-#include "lwdf.h"
+#include "homodyne.h"
 #include "ppg_delineator.h"
 
 /* State variables */
@@ -58,6 +37,7 @@ struct sample_s {
   uint8_t   channel;
   uint16_t  value;
 } sample;
+HOMODYNE_CHANNEL channels[2];
 
 /* Comm's variables */
 char_fifo_t tx_fifo;
@@ -67,7 +47,9 @@ char_fifo_t rx_fifo;
  * @brief  Main function
  *****************************************************************************/
 int main(void)
-{                              
+{
+  /* Local variables */
+  int16_t measurement;
   // Note that the chip resets to using the HFRCO at 14MHz
   /* Chip errata */
   CHIP_Init();               
@@ -88,6 +70,13 @@ int main(void)
   channel = 0;
   mode = 0;
   sample.waiting = false;
+  
+  /* Set up the homodynde detection system */
+  channels[0].filter.order = 5;
+  channels[1].filter.order = 5;
+  hd_reset(&channels[0]);
+  hd_reset(&channels[1]);
+  
   
   /* Manually initialise TX FIFO */
   tx_fifo.depth = 0;
@@ -116,21 +105,34 @@ int main(void)
   xDAC_write(dac_command, 0x108, true);
   
   /* Infinite main loop */
-  static uint8_t count = 0;
   while (1) {
-    if (sample.waiting) {
-      sample.waiting = false;
-      if (sample.channel == 1) {
-        sample_message.payload[0] = (uint8_t)(sample.value>>8);
-        sample_message.payload[1] = (uint8_t)(sample.value&0x00FF);
-      }
-      else {
-        sample_message.payload[2] = (uint8_t)(sample.value>>8);
-        sample_message.payload[3] = (uint8_t)(sample.value&0x00FF);
-        sample_message.header.length = sizeof(sample_message.header) + 4;
-        tx_message(&sample_message, &tx_fifo);
-      }
+    /* Test the first optical channel for waiting data */
+    if (channels[0].adc_waiting) {
+      measurement = hd_adc_process(&channels[0]);
+      sample_message.payload[0] = (uint8_t)(measurement>>8);
+      sample_message.payload[1] = (uint8_t)(measurement&0x00FF);
     }
+    /* Test the second optical channel for waiting data */
+    if (channels[1].adc_waiting) {
+      measurement = hd_adc_process(&channels[1]);
+      sample_message.payload[2] = (uint8_t)(measurement>>8);
+      sample_message.payload[3] = (uint8_t)(measurement&0x00FF);
+      sample_message.header.length = sizeof(sample_message.header) + 4;
+      tx_message(&sample_message, &tx_fifo);
+    }
+//    if (sample.waiting) {
+//      sample.waiting = false;
+//      if (sample.channel == 1) {
+//        sample_message.payload[0] = (uint8_t)(sample.value>>8);
+//        sample_message.payload[1] = (uint8_t)(sample.value&0x00FF);
+//      }
+//      else {
+//        sample_message.payload[2] = (uint8_t)(sample.value>>8);
+//        sample_message.payload[3] = (uint8_t)(sample.value&0x00FF);
+//        sample_message.header.length = sizeof(sample_message.header) + 4;
+//        tx_message(&sample_message, &tx_fifo);
+//      }
+//    }
   }
 }          
                                    
@@ -140,7 +142,7 @@ int main(void)
  *****************************************************************************/
 void USART1_RX_IRQHandler(void)
 {
-  static uint8_t rxdata;
+  uint8_t rxdata;
   /* Checking that RX-flag is set*/
   if (USART1->STATUS & USART_STATUS_RXDATAV) {
     mode = ~mode;
@@ -198,8 +200,12 @@ void LETIMER0_IRQHandler(void)
     TIMER_Enable(TIMER0,true);
     TIMER_IntEnable(TIMER0, TIMER_IF_OF);
     NVIC_EnableIRQ(TIMER0_IRQn);
+    
     /* Reset the intergrator now the conversion is complete */
     ITIA_RESET();
+    
+    /* Increment the phase of the homodynde detection system */
+    hd_increment_phase(&channels[channel]);
 
     /* Set VCCS current depending on next optical channel */
     if (channel==0) {
@@ -212,7 +218,7 @@ void LETIMER0_IRQHandler(void)
       LED1_OFF();     
       /* Prep for RED channel */
       channel = 0;
-      iDAC_write((uint32_t)(4095));
+      iDAC_write((uint32_t)(4000));
       /* Increment the phase at underflow. Reset if required. */
       if (++phase == 4) phase = 0;   
 
@@ -251,7 +257,9 @@ void ADC0_IRQHandler(void)
   /* Clear ADC0 interrupt flag */
   ADC0->IFC = 1;
   /* Read conversion result to clear Single Data Valid flag */
-  uint32_t adcResult = ADC_DataSingleGet(ADC0);  
+  uint32_t adcResult = ADC_DataSingleGet(ADC0);
+  /* Store the value for subsequent processing */
+  hd_adc_hold(&channels[channel], (int16_t)(adcResult))  ;
   /* Save value and flag that it is waiting to be processed */
   sample.waiting = true;
   sample.value = (uint16_t)(adcResult & 0xFFFF);
