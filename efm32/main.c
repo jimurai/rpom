@@ -36,6 +36,10 @@ HOMODYNE_CHANNEL channels[2];
 int8_t osc_lut[4] = {-1, 0, 1, 0};
 LWDF_ALPHA hd_alphas[FILTER_ORDER] = {1804,2847,25,1073,24};
 uint8_t hd_types[FILTER_ORDER] = {0,3,0,3,0};
+/* DC current rejection (DCR) variables */
+const uint16_t XDAC_LIMIT = (1<<12)-1;
+const int16_t MID_RANGE = 1<<(12-1);
+int32_t dcr_integration = 0;
 
 
 /* Comm's variables */
@@ -48,7 +52,7 @@ char_fifo_t rx_fifo;
 int main(void)
 {
   /* Local variables */
-  int32_t measurement,temp_i;
+  int32_t measurement,_i, _error;
   // Note that the chip resets to using the HFRCO at 14MHz
   /* Chip errata */
   CHIP_Init();               
@@ -110,16 +114,34 @@ int main(void)
   
   /* Infinite main loop */
   while (1) {
-    for (temp_i=0;temp_i<2;temp_i++) {
+    for (_i=0;_i<2;_i++) {
       /* Test the first optical channel for waiting data */
-      if (channels[temp_i].adc_waiting) {
+      if (channels[_i].adc_waiting) {
+        /* Perform DC current rejection */
+        _error = (int32_t)channels[_i].adc_hold - MID_RANGE;
+        /* Implement any required gain */
+        dcr_integration += (_error+(1<<7))>>8;
+        /* Bound the integration to limits of the external DAC */
+        if (dcr_integration>XDAC_LIMIT) {
+          dcr_integration = XDAC_LIMIT;
+        }
+        else if (dcr_integration<0) {
+          dcr_integration = 0;
+        }
+        else
+          
+        /* Set the current feedbakc according to integrator */
+        xDAC_write((3 << 3) | (1 << 0), dcr_integration, true);
         /* Perform homodyne detection on raw ADC value */
-        measurement = hd_adc_process(&channels[temp_i]);
+        measurement = hd_adc_process(&channels[_i]);
         /* Store the result for transmission */
-        sample_message.payload[(temp_i<<1)]   = (uint8_t)(measurement>>18);
-        sample_message.payload[(temp_i<<1)+1] = (uint8_t)((measurement>>10)&0x00FF);
+        sample_message.payload[(_i<<1)]   = (uint8_t)(measurement>>18);
+        sample_message.payload[(_i<<1)+1] = (uint8_t)((measurement>>10)&0x00FF);
         /* If all channels complete then transmit the packet */
-        if (temp_i==1) {
+        if (_i==1) {
+          /* DEBUG: keep raw value to look at DCR performance */
+          sample_message.payload[2] = (uint8_t)(channels[1].adc_hold>>8);
+          sample_message.payload[3] = (uint8_t)(channels[1].adc_hold&0x00FF);
           sample_message.header.length = sizeof(sample_message.header) + 4;
           tx_message(&sample_message, &tx_fifo);
         }
@@ -201,7 +223,7 @@ void LETIMER0_IRQHandler(void)
       LED0_OFF();              
       /* Prep for LED1(IR) channel */
       channel = 1;
-      iDAC_write(300);
+      iDAC_write(0);
       /* Turn on LED immediate if in phase 2 */
       if (channels[1].led_phase==2) LED1_ON();
     }
