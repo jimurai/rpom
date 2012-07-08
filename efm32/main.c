@@ -29,15 +29,14 @@
 #include "ppg_delineator.h"
 
 /* State variables */
-uint8_t phase;
-uint8_t channel;
-uint8_t mode;
-struct sample_s {
-  bool      waiting;
-  uint8_t   channel;
-  uint16_t  value;
-} sample;
+uint8_t channel, adc_channel;
+/* Homodyne detection systems */
+#define FILTER_ORDER 5
 HOMODYNE_CHANNEL channels[2];
+int8_t osc_lut[4] = {-1, 0, 1, 0};
+LWDF_ALPHA hd_alphas[FILTER_ORDER] = {1804,2847,25,1073,24};
+uint8_t hd_types[FILTER_ORDER] = {0,3,0,3,0};
+
 
 /* Comm's variables */
 char_fifo_t tx_fifo;
@@ -49,7 +48,7 @@ char_fifo_t rx_fifo;
 int main(void)
 {
   /* Local variables */
-  int16_t measurement;
+  int32_t measurement,temp_i;
   // Note that the chip resets to using the HFRCO at 14MHz
   /* Chip errata */
   CHIP_Init();               
@@ -58,25 +57,24 @@ int main(void)
   /* Initialise core functionality */
   CMU_init();
   GPIO_init();
-
-  /* Set up low frequency timer for sampling */
-  LFTIMER_init();
-
-  /* Set up high accuracy timer for precision timing procedures */
-  HFTIMER_init();
-  
-  /* Set phase and state variables */
-  phase = 0;
-  channel = 0;
-  mode = 0;
-  sample.waiting = false;
   
   /* Set up the homodynde detection system */
-  channels[0].filter.order = 5;
-  channels[1].filter.order = 5;
+  channel = 0;
+  uint8_t i,j = 0;
+  for (i=0;i<2;i++) {
+    channels[i].local_osc.local_osc = osc_lut;
+    channels[i].local_osc.phase_limit = 4;
+    channels[i].local_osc.phase_offset = 0;
+    channels[i].filter.order = FILTER_ORDER;
+    for (j=0;j<FILTER_ORDER;j++) {
+      channels[i].filter.alphas[j] = hd_alphas[j];
+      channels[i].filter.types[j] = hd_types[j];
+    }
+  }
+  // Make channel 0 orthogonal to channel 1 (pi/2 offset)
+  channels[1].local_osc.phase_offset = 1;
   hd_reset(&channels[0]);
   hd_reset(&channels[1]);
-  
   
   /* Manually initialise TX FIFO */
   tx_fifo.depth = 0;
@@ -94,7 +92,7 @@ int main(void)
   USART1_uart_init();
   iDAC_init();
   xDAC_init();  
-  iDAC_write((uint32_t)((0.0 * 4096) / 1.25));
+  iDAC_write(0);
   iADC_init();
 
   // DAC_A
@@ -103,36 +101,30 @@ int main(void)
   // DAC_B
   dac_command = (3 << 3) | (1 << 0);
   xDAC_write(dac_command, 0x108, true);
+
+  /* Set up low frequency timer for sampling */
+  LFTIMER_init();
+
+  /* Set up high accuracy timer for precision timing procedures */
+  HFTIMER_init();
   
   /* Infinite main loop */
   while (1) {
-    /* Test the first optical channel for waiting data */
-    if (channels[0].adc_waiting) {
-      measurement = hd_adc_process(&channels[0]);
-      sample_message.payload[0] = (uint8_t)(measurement>>8);
-      sample_message.payload[1] = (uint8_t)(measurement&0x00FF);
+    for (temp_i=0;temp_i<2;temp_i++) {
+      /* Test the first optical channel for waiting data */
+      if (channels[temp_i].adc_waiting) {
+        /* Perform homodyne detection on raw ADC value */
+        measurement = hd_adc_process(&channels[temp_i]);
+        /* Store the result for transmission */
+        sample_message.payload[(temp_i<<1)]   = (uint8_t)(measurement>>18);
+        sample_message.payload[(temp_i<<1)+1] = (uint8_t)((measurement>>10)&0x00FF);
+        /* If all channels complete then transmit the packet */
+        if (temp_i==1) {
+          sample_message.header.length = sizeof(sample_message.header) + 4;
+          tx_message(&sample_message, &tx_fifo);
+        }
+      }      
     }
-    /* Test the second optical channel for waiting data */
-    if (channels[1].adc_waiting) {
-      measurement = hd_adc_process(&channels[1]);
-      sample_message.payload[2] = (uint8_t)(measurement>>8);
-      sample_message.payload[3] = (uint8_t)(measurement&0x00FF);
-      sample_message.header.length = sizeof(sample_message.header) + 4;
-      tx_message(&sample_message, &tx_fifo);
-    }
-//    if (sample.waiting) {
-//      sample.waiting = false;
-//      if (sample.channel == 1) {
-//        sample_message.payload[0] = (uint8_t)(sample.value>>8);
-//        sample_message.payload[1] = (uint8_t)(sample.value&0x00FF);
-//      }
-//      else {
-//        sample_message.payload[2] = (uint8_t)(sample.value>>8);
-//        sample_message.payload[3] = (uint8_t)(sample.value&0x00FF);
-//        sample_message.header.length = sizeof(sample_message.header) + 4;
-//        tx_message(&sample_message, &tx_fifo);
-//      }
-//    }
   }
 }          
                                    
@@ -145,7 +137,6 @@ void USART1_RX_IRQHandler(void)
   uint8_t rxdata;
   /* Checking that RX-flag is set*/
   if (USART1->STATUS & USART_STATUS_RXDATAV) {
-    mode = ~mode;
     rxdata = USART1->RXDATA;        
     /* Checking that the USART is waiting for data */     
 //    while (!(USART1->STATUS & USART_STATUS_TXBL)) ;
@@ -192,6 +183,7 @@ void LETIMER0_IRQHandler(void)
   if (flags& LETIMER_IF_UF) {
 
     /* Trigger ADC conversion and enable interrupt*/    
+    adc_channel = channel;
     ADC_Start(ADC0, adcStartSingle);       
     ADC0->IEN = ADC_IEN_SINGLE;
     NVIC_EnableIRQ(ADC0_IRQn);
@@ -201,47 +193,37 @@ void LETIMER0_IRQHandler(void)
     TIMER_IntEnable(TIMER0, TIMER_IF_OF);
     NVIC_EnableIRQ(TIMER0_IRQn);
     
-    /* Reset the intergrator now the conversion is complete */
-    ITIA_RESET();
-    
     /* Increment the phase of the homodynde detection system */
     hd_increment_phase(&channels[channel]);
 
     /* Set VCCS current depending on next optical channel */
     if (channel==0) {
       LED0_OFF();              
-      /* Prep for IR channel */
+      /* Prep for LED1(IR) channel */
       channel = 1;
-      iDAC_write((uint32_t)((0.2 * 4096) / 1.25));
+      iDAC_write(300);
+      /* Turn on LED immediate if in phase 2 */
+      if (channels[1].led_phase==2) LED1_ON();
     }
     else {
       LED1_OFF();     
-      /* Prep for RED channel */
+      /* Prep for LED0(RED) channel */
       channel = 0;
-      iDAC_write((uint32_t)(4000));
-      /* Increment the phase at underflow. Reset if required. */
-      if (++phase == 4) phase = 0;   
+      iDAC_write(2000);
+      /* Turn on LED immediate if in phase 2 */
+      if (channels[0].led_phase==2) LED0_ON(); 
 
-    }                                 
-
-    /* Turn relevant LED ON immediately in phase 2 */
-    if (phase == 2) {
-      //if (channel==0) LED0_OFF();
-      if (channel==0) LED0_ON();
-      else            LED1_ON(); 
-    }          
+    }
 
     /* Clear interrupt flag manually */
     LETIMER_IntClear(LETIMER0, LETIMER_IF_UF);
   }                                                     
   
   if (flags& LETIMER_IF_COMP1) {
-    /* Turn ON relevant LED after given period. Odd phases only. */
-    if (phase&0x01) {
-      //if (channel==0) LED0_OFF();
-      if (channel==0) LED0_ON();
-      else            LED1_ON();  
-    }                                    
+    if ((channel==0) && (channels[0].led_phase&0x01))
+      LED0_ON();
+    else if ((channel==1) && (channels[1].led_phase&0x01))
+      LED1_ON();
     /* Clear interrupt flag manually */
     LETIMER_IntClear(LETIMER0, LETIMER_IF_COMP1);
   }   
@@ -254,19 +236,14 @@ void LETIMER0_IRQHandler(void)
  *****************************************************************************/
 void ADC0_IRQHandler(void)
 {
+  /* Reset the intergrator now the conversion is complete */
+  ITIA_RESET();
   /* Clear ADC0 interrupt flag */
   ADC0->IFC = 1;
   /* Read conversion result to clear Single Data Valid flag */
   uint32_t adcResult = ADC_DataSingleGet(ADC0);
   /* Store the value for subsequent processing */
-  hd_adc_hold(&channels[channel], (int16_t)(adcResult))  ;
-  /* Save value and flag that it is waiting to be processed */
-  sample.waiting = true;
-  sample.value = (uint16_t)(adcResult & 0xFFFF);
-  if (channel == 0)
-    sample.channel = 1;
-  else 
-    sample.channel = 0;
+  hd_adc_hold(&channels[adc_channel], (int16_t)(adcResult));
   /* Disable interrupt */
   ADC0->IEN &= ~(ADC_IEN_SINGLE);
   NVIC_DisableIRQ(ADC0_IRQn);

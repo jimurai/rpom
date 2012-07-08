@@ -52,8 +52,8 @@ class rpomSerialThread(threading.Thread):
 				# Else process the packet
 				elif isinstance(temp,blackbox_phy.BlackBox_Packet):
 					if temp.type == 0:
-						_working_packet.ir.append((temp.payload[0]<<8) + temp.payload[1])
-						_working_packet.red.append((temp.payload[2]<<8) + temp.payload[3])
+						_working_packet.red.append((temp.payload[0]<<8) + temp.payload[1])
+						_working_packet.ir.append((temp.payload[2]<<8) + temp.payload[3])
 						_index += 1
 						if _index == 8:
 							self.queue.put(_working_packet)
@@ -63,7 +63,7 @@ class rpomSerialThread(threading.Thread):
 	def join(self, timeout=None):
 		# If the RPOM needs any STOP commands put them here
 		# Cause the run() loop to complete and stop the thread
-		self.enabled.clear()
+		self.enabled.clear
 		self.serial_stream.close()
 		threading.Thread.join(self, timeout)
 

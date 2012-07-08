@@ -486,6 +486,11 @@
               <FileType>1</FileType>
               <FilePath>..\efm32\main.c</FilePath>
             </File>
+            <File>
+              <FileName>homodyne.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\efm32\homodyne.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

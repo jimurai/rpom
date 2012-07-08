@@ -13,15 +13,10 @@ from scipy import fftpack
 import pyqtgraph as pg
 import rpom_tools
 
-class rpomPlot(pg.PlotWidget):
-	def __init__(self, name):
-		# Init parent
-		super(rpomPlot,self).__init__(name)
-
 class rpomUI(QtGui.QMainWindow):
 	PLOTDEPTH = 1024*3
 	QUEUEDEPTH = 500
-	Ts = 1.0/1e3
+	Ts = 2*16.0/32768.0
 	def __init__(self, parent=None):
 		# Grab arguments
 		try:
@@ -87,7 +82,7 @@ class rpomUI(QtGui.QMainWindow):
 		
 		# Redraw the raw plots
 		self.curveIR.updateData(self.ir,x=self.t)
-		self.curveRED.updateData(self.red,x=self.t)
+		self.curveRED.updateData(self.red,x=self.t+self.Ts/2)
 		# Redraw the Fourier plots
 		self.curveIRfreq.updateData(20.0*np.log10(fir[1:self.Mn]),x=self.f[1:])
 		self.curveREDfreq.updateData(20.0*np.log10(fred[1:self.Mn]),x=self.f[1:])
@@ -128,8 +123,7 @@ class rpomUI(QtGui.QMainWindow):
 		# Stop the the timer and kill the force thread
 		self.timer.stop()
 		# Stop the sensor interface stream
-		self.stream.join(timeout=5.0)
-		self.stream = None
+		self.stream.join()
 		# Set status message
 		self.streaming_text.setText("RPOM sensor disabled")
 		self.port_text.setText("COM port closed")
@@ -184,7 +178,7 @@ class rpomUI(QtGui.QMainWindow):
 		self.resize(1000, 600)
 
 	def display_about(self):
-		QtGui.QMessageBox.about(self, "About BSNv3 Force Plate Monitor", __doc__)	
+		QtGui.QMessageBox.about(self, "About JP1008's RPOM module interface", __doc__)	
 
 if __name__ == "__main__":
 	app = QtGui.QApplication(sys.argv)

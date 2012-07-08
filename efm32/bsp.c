@@ -120,8 +120,8 @@ void LFTIMER_init(void)
      for the LETIMER.
      COMP1 gets decremented through the program execution
      to generate a different PWM duty cycle */
-  LETIMER_CompareSet(LETIMER0, 0, 16);
-  LETIMER_CompareSet(LETIMER0, 1, 8);
+  LETIMER_CompareSet(LETIMER0, 0, 15);
+  LETIMER_CompareSet(LETIMER0, 1, 7);
   
   /* Route LETIMER to location 0 */
   LETIMER0->ROUTE = LETIMER_ROUTE_LOCATION_LOC0;
