@@ -31,15 +31,17 @@
 /* State variables */
 uint8_t channel, adc_channel;
 /* Homodyne detection systems */
-#define FILTER_ORDER 5
 HOMODYNE_CHANNEL channels[2];
 int8_t osc_lut[4] = {-1, 0, 1, 0};
+#define FILTER_ORDER 5
 LWDF_ALPHA hd_alphas[FILTER_ORDER] = {1804,2847,25,1073,24};
 uint8_t hd_types[FILTER_ORDER] = {0,3,0,3,0};
 /* DC current rejection (DCR) variables */
+const uint16_t XDAC_RST = 0x100;
 const uint16_t XDAC_LIMIT = (1<<12)-1;
 const int16_t MID_RANGE = 1<<(12-1);
-int32_t dcr_integration = 0;
+/* Operating mode */
+int system_mode = 0;
 
 
 /* Comm's variables */
@@ -52,7 +54,9 @@ char_fifo_t rx_fifo;
 int main(void)
 {
   /* Local variables */
-  int32_t measurement,_i, _error;
+  int32_t measurement,_i,_j,_error;
+  static int32_t dcr_integration = 0;
+  
   // Note that the chip resets to using the HFRCO at 14MHz
   /* Chip errata */
   CHIP_Init();               
@@ -64,26 +68,28 @@ int main(void)
   
   /* Set up the homodynde detection system */
   channel = 0;
-  uint8_t i,j = 0;
-  for (i=0;i<2;i++) {
-    channels[i].local_osc.local_osc = osc_lut;
-    channels[i].local_osc.phase_limit = 4;
-    channels[i].local_osc.phase_offset = 0;
-    channels[i].filter.order = FILTER_ORDER;
-    for (j=0;j<FILTER_ORDER;j++) {
-      channels[i].filter.alphas[j] = hd_alphas[j];
-      channels[i].filter.types[j] = hd_types[j];
+  for (_i=0;_i<2;_i++) {
+    channels[_i].local_osc.local_osc = osc_lut;
+    channels[_i].local_osc.phase_limit = 4;
+    channels[_i].local_osc.phase_offset = 0;
+    channels[_i].filter.order = FILTER_ORDER;
+    for (_j=0;_j<FILTER_ORDER;_j++) {
+      channels[_i].filter.alphas[_j] = hd_alphas[_j];
+      channels[_i].filter.types[_j] = hd_types[_j];
     }
   }
   // Make channel 0 orthogonal to channel 1 (pi/2 offset)
   channels[1].local_osc.phase_offset = 1;
-  hd_reset(&channels[0]);
-  hd_reset(&channels[1]);
+  hd_reset(&channels[0],MID_RANGE);
+  hd_reset(&channels[1],MID_RANGE);
   
-  /* Manually initialise TX FIFO */
+  /* Manually initialise the FIFOs */
   tx_fifo.depth = 0;
   tx_fifo.pRead = 0;
   tx_fifo.pWrite = 0;
+  rx_fifo.depth = 0;
+  rx_fifo.pRead = 0;
+  rx_fifo.pWrite = 0;
   
   /* Create a message */
   message_t sample_message;
@@ -101,10 +107,10 @@ int main(void)
 
   // DAC_A
   uint8_t dac_command = (3 << 3);
-  xDAC_write(dac_command, 0x100, true);          
+  xDAC_write(dac_command, XDAC_RST, true);          
   // DAC_B
   dac_command = (3 << 3) | (1 << 0);
-  xDAC_write(dac_command, 0x108, true);
+  xDAC_write(dac_command, XDAC_RST, true);
 
   /* Set up low frequency timer for sampling */
   LFTIMER_init();
@@ -114,36 +120,71 @@ int main(void)
   
   /* Infinite main loop */
   while (1) {
+    /* Process any characters received on the UART */
+    while (rx_fifo.depth>0) {
+      /* Set the system state according to the received character */
+      if (rx_fifo.buffer[rx_fifo.pRead] == 0) {
+        /* Put the entire system into its reset state */
+        channel = 0;
+        LEDS_OFF();
+        xDAC_write((3 << 3) | (1 << 0), XDAC_RST, true);
+        system_mode = 0;
+        hd_reset(&channels[0],MID_RANGE);
+        hd_reset(&channels[1],MID_RANGE);
+      }  
+      else {    
+        system_mode = rx_fifo.buffer[rx_fifo.pRead];
+      }
+      /* Increment pointers */
+      if (++rx_fifo.pRead>UART_BUFFER_DEPTH) rx_fifo.pRead = 0;
+      rx_fifo.depth--;
+    }
+    
+    /* Process any waiting ADC values */
     for (_i=0;_i<2;_i++) {
-      /* Test the first optical channel for waiting data */
       if (channels[_i].adc_waiting) {
-        /* Perform DC current rejection */
-        _error = (int32_t)channels[_i].adc_hold - MID_RANGE;
-        /* Implement any required gain */
-        dcr_integration += (_error+(1<<7))>>8;
-        /* Bound the integration to limits of the external DAC */
-        if (dcr_integration>XDAC_LIMIT) {
-          dcr_integration = XDAC_LIMIT;
+        /* DC current rejection ? */
+        if (system_mode&(1<<1)) {
+          /* Perform DC current rejection */
+          _error = (int32_t)channels[_i].adc_hold - MID_RANGE;
+          /* Implement any required gain */
+          dcr_integration += (_error+(1<<4))>>5;
+          /* Bound the integration to limits of the external DAC */
+          if (dcr_integration>XDAC_LIMIT) {
+            dcr_integration = XDAC_LIMIT;
+          }
+          else if (dcr_integration<0) {
+            dcr_integration = 0;
+          }            
+          /* Set the current feedbakc according to integrator */
+          xDAC_write((3 << 3) | (1 << 0), dcr_integration, true);
         }
-        else if (dcr_integration<0) {
-          dcr_integration = 0;
+        
+        /* Homodyne? */
+        if (system_mode&(1<<2)) {
+          /* Perform homodyne detection on raw ADC value */
+          measurement = hd_adc_process(&channels[_i])<<6;
         }
-        else
-          
-        /* Set the current feedbakc according to integrator */
-        xDAC_write((3 << 3) | (1 << 0), dcr_integration, true);
-        /* Perform homodyne detection on raw ADC value */
-        measurement = hd_adc_process(&channels[_i]);
-        /* Store the result for transmission */
-        sample_message.payload[(_i<<1)]   = (uint8_t)(measurement>>18);
-        sample_message.payload[(_i<<1)+1] = (uint8_t)((measurement>>10)&0x00FF);
-        /* If all channels complete then transmit the packet */
-        if (_i==1) {
-          /* DEBUG: keep raw value to look at DCR performance */
-          sample_message.payload[2] = (uint8_t)(channels[1].adc_hold>>8);
-          sample_message.payload[3] = (uint8_t)(channels[1].adc_hold&0x00FF);
-          sample_message.header.length = sizeof(sample_message.header) + 4;
-          tx_message(&sample_message, &tx_fifo);
+        else {
+          /* Send the raw DAC value if homodyne not requested */
+          channels[_i].adc_waiting = false;
+          measurement = channels[_i].adc_hold<<16;
+        }
+        
+        /* Delineate? */
+        if (system_mode&(1<<3)) {
+          /* Perform homodyne detection on raw ADC value */
+          measurement = hd_adc_process(&channels[_i])<<6;
+        }
+        else {
+          /* Transmit raw data if not delineating */
+          sample_message.payload[(_i<<1)]   = (uint8_t)(measurement>>24);
+          sample_message.payload[(_i<<1)+1] = (uint8_t)((measurement>>16)&0x00FF);
+          /* If all channels complete then transmit the packet */
+          if (_i==1) {
+            sample_message.header.length = sizeof(sample_message.header) + 4;
+            tx_message(&sample_message, &tx_fifo);
+          }
         }
       }      
     }
@@ -156,10 +197,17 @@ int main(void)
  *****************************************************************************/
 void USART1_RX_IRQHandler(void)
 {
-  uint8_t rxdata;
+  char rxdata;
   /* Checking that RX-flag is set*/
   if (USART1->STATUS & USART_STATUS_RXDATAV) {
     rxdata = USART1->RXDATA;        
+    /* Quit if FIFO full */
+    if (rx_fifo.depth>=UART_BUFFER_DEPTH) return;
+    /* Store the character */
+    rx_fifo.buffer[rx_fifo.pWrite] = rxdata;
+    /* Increment write pointer */
+    if (++rx_fifo.pWrite>UART_BUFFER_DEPTH) rx_fifo.pWrite = 0;
+    rx_fifo.depth++;
     /* Checking that the USART is waiting for data */     
 //    while (!(USART1->STATUS & USART_STATUS_TXBL)) ;
     /* Transmitting the next byte */
@@ -203,49 +251,51 @@ void LETIMER0_IRQHandler(void)
   uint32_t flags = LETIMER_IntGet(LETIMER0);
   
   if (flags& LETIMER_IF_UF) {
-
-    /* Trigger ADC conversion and enable interrupt*/    
-    adc_channel = channel;
-    ADC_Start(ADC0, adcStartSingle);       
-    ADC0->IEN = ADC_IEN_SINGLE;
-    NVIC_EnableIRQ(ADC0_IRQn);
-
-    /* Trigger conversion & reset timer */           
-    TIMER_Enable(TIMER0,true);
-    TIMER_IntEnable(TIMER0, TIMER_IF_OF);
-    NVIC_EnableIRQ(TIMER0_IRQn);
-    
-    /* Increment the phase of the homodynde detection system */
-    hd_increment_phase(&channels[channel]);
-
-    /* Set VCCS current depending on next optical channel */
-    if (channel==0) {
-      LED0_OFF();              
-      /* Prep for LED1(IR) channel */
-      channel = 1;
-      iDAC_write(0);
-      /* Turn on LED immediate if in phase 2 */
-      if (channels[1].led_phase==2) LED1_ON();
+    if (system_mode) {
+      /* Trigger ADC conversion and enable interrupt*/    
+      adc_channel = channel;
+      ADC_Start(ADC0, adcStartSingle);       
+      ADC0->IEN = ADC_IEN_SINGLE;
+      NVIC_EnableIRQ(ADC0_IRQn);
+  
+      /* Trigger conversion & reset timer */           
+      TIMER_Enable(TIMER0,true);
+      TIMER_IntEnable(TIMER0, TIMER_IF_OF);
+      NVIC_EnableIRQ(TIMER0_IRQn);
+      
+      /* Increment the phase of the homodynde detection system */
+      hd_increment_phase(&channels[channel]);
+  
+      /* Set VCCS current depending on next optical channel */
+      if (channel==0) {
+        LED0_OFF();              
+        /* Prep for LED1(IR) channel */
+        channel = 1;
+        iDAC_write(250);
+        /* Turn on LED immediate if in phase 2 */
+        if (channels[1].led_phase==2) LED1_ON();
+      }
+      else {
+        LED1_OFF();     
+        /* Prep for LED0(RED) channel */
+        channel = 0;
+        iDAC_write(2000);
+        /* Turn on LED immediate if in phase 2 */
+        if (channels[0].led_phase==2) LED0_ON(); 
+  
+      }
     }
-    else {
-      LED1_OFF();     
-      /* Prep for LED0(RED) channel */
-      channel = 0;
-      iDAC_write(2000);
-      /* Turn on LED immediate if in phase 2 */
-      if (channels[0].led_phase==2) LED0_ON(); 
-
-    }
-
     /* Clear interrupt flag manually */
     LETIMER_IntClear(LETIMER0, LETIMER_IF_UF);
   }                                                     
   
   if (flags& LETIMER_IF_COMP1) {
-    if ((channel==0) && (channels[0].led_phase&0x01))
-      LED0_ON();
-    else if ((channel==1) && (channels[1].led_phase&0x01))
-      LED1_ON();
+    if (system_mode) {
+      if ((channel==0) && (channels[0].led_phase&0x01))
+        LED0_ON();
+      else if ((channel==1) && (channels[1].led_phase&0x01))
+        LED1_ON();
+    }
     /* Clear interrupt flag manually */
     LETIMER_IntClear(LETIMER0, LETIMER_IF_COMP1);
   }   

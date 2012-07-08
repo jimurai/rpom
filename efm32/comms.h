@@ -11,6 +11,9 @@
 extern "C" {
 #endif
 
+#include <stdint.h>
+#include <stdbool.h>
+
 #define UART_BUFFER_DEPTH 32
 typedef struct { 
   uint8_t pRead;  
