@@ -30,8 +30,19 @@
 
 /* State variables */
 uint8_t channel, adc_channel;
-/* Homodyne detection systems */
-HOMODYNE_CHANNEL channels[2];
+/* System settings */
+int system_mode = 0;
+#define NCHANNELS 2
+struct rpom_system_s {
+  int16_t   system_mode;
+  uint16_t  led_current[NCHANNELS];
+  uint32_t  pd_thresh[NCHANNELS*2];
+  LWDF_ALPHA filter_alphas[LWDF_MAX_ORDER];
+  uint8_t filter_types[LWDF_MAX_ORDER];
+};
+/* Homodyne detection variables */
+HOMODYNE_CHANNEL channels[NCHANNELS];
+PPG_DELINEATOR delineator[NCHANNELS];
 int8_t osc_lut[4] = {-1, 0, 1, 0};
 #define FILTER_ORDER 5
 LWDF_ALPHA hd_alphas[FILTER_ORDER] = {1804,2847,25,1073,24};
@@ -40,13 +51,20 @@ uint8_t hd_types[FILTER_ORDER] = {0,3,0,3,0};
 const uint16_t XDAC_RST = 0x100;
 const uint16_t XDAC_LIMIT = (1<<12)-1;
 const int16_t MID_RANGE = 1<<(12-1);
-/* Operating mode */
-int system_mode = 0;
-
-
+/* Quadrature delineation variables */
 /* Comm's variables */
 char_fifo_t tx_fifo;
 char_fifo_t rx_fifo;
+
+/* Put the entire system into its reset state */
+void enter_reset_state(void) {
+  channel = 0;
+  LEDS_OFF();
+  xDAC_write((3 << 3) | (1 << 0), XDAC_RST, true);
+  system_mode = 0;
+  hd_reset(&channels[0],MID_RANGE);
+  hd_reset(&channels[1],MID_RANGE);
+}
 
 /**************************************************************************//**
  * @brief  Main function
@@ -77,6 +95,7 @@ int main(void)
       channels[_i].filter.alphas[_j] = hd_alphas[_j];
       channels[_i].filter.types[_j] = hd_types[_j];
     }
+    ppgd_init(&delineator[_i],1<<16,1<<16);
   }
   // Make channel 0 orthogonal to channel 1 (pi/2 offset)
   channels[1].local_osc.phase_offset = 1;
@@ -92,7 +111,7 @@ int main(void)
   rx_fifo.pWrite = 0;
   
   /* Create a message */
-  message_t sample_message;
+  message_t sample_message, *rx_message;
   sample_message.header.id = 0x00;
   sample_message.header.type = 0x00;
   sample_message.header.length = 0;
@@ -121,23 +140,17 @@ int main(void)
   /* Infinite main loop */
   while (1) {
     /* Process any characters received on the UART */
-    while (rx_fifo.depth>0) {
-      /* Set the system state according to the received character */
-      if (rx_fifo.buffer[rx_fifo.pRead] == 0) {
-        /* Put the entire system into its reset state */
-        channel = 0;
-        LEDS_OFF();
-        xDAC_write((3 << 3) | (1 << 0), XDAC_RST, true);
-        system_mode = 0;
-        hd_reset(&channels[0],MID_RANGE);
-        hd_reset(&channels[1],MID_RANGE);
-      }  
-      else {    
-        system_mode = rx_fifo.buffer[rx_fifo.pRead];
+    if (message_parser(&rx_fifo,&rx_message)) {
+      switch(rx_message->header.type) {
+      case 0x00:    // System state
+        if (rx_message->payload[0]==0)
+          enter_reset_state();
+        else
+          system_mode = rx_message->payload[0];
+        break;
+      default:
+        break;
       }
-      /* Increment pointers */
-      if (++rx_fifo.pRead>UART_BUFFER_DEPTH) rx_fifo.pRead = 0;
-      rx_fifo.depth--;
     }
     
     /* Process any waiting ADC values */
@@ -173,8 +186,7 @@ int main(void)
         
         /* Delineate? */
         if (system_mode&(1<<3)) {
-          /* Perform homodyne detection on raw ADC value */
-          measurement = hd_adc_process(&channels[_i])<<6;
+          ppgd_write(&delineator[_i], measurement);
         }
         else {
           /* Transmit raw data if not delineating */
@@ -183,7 +195,7 @@ int main(void)
           /* If all channels complete then transmit the packet */
           if (_i==1) {
             sample_message.header.length = sizeof(sample_message.header) + 4;
-            tx_message(&sample_message, &tx_fifo);
+            tx_message(&tx_fifo, &sample_message);
           }
         }
       }      
@@ -197,17 +209,11 @@ int main(void)
  *****************************************************************************/
 void USART1_RX_IRQHandler(void)
 {
-  char rxdata;
+  uint8_t byte;
   /* Checking that RX-flag is set*/
   if (USART1->STATUS & USART_STATUS_RXDATAV) {
-    rxdata = USART1->RXDATA;        
-    /* Quit if FIFO full */
-    if (rx_fifo.depth>=UART_BUFFER_DEPTH) return;
-    /* Store the character */
-    rx_fifo.buffer[rx_fifo.pWrite] = rxdata;
-    /* Increment write pointer */
-    if (++rx_fifo.pWrite>UART_BUFFER_DEPTH) rx_fifo.pWrite = 0;
-    rx_fifo.depth++;
+    byte = USART1->RXDATA;
+    fifo_write(&rx_fifo, byte);
     /* Checking that the USART is waiting for data */     
 //    while (!(USART1->STATUS & USART_STATUS_TXBL)) ;
     /* Transmitting the next byte */
@@ -225,10 +231,7 @@ void USART1_TX_IRQHandler(void)
 {
   /* Check that the USART is waiting for data to TX */
   if (USART1->STATUS & USART_STATUS_TXBL)
-  {
-    /* Increment read pointer. Wrap if required. */
-    if (++tx_fifo.pRead>=UART_BUFFER_DEPTH) tx_fifo.pRead=0;
-    tx_fifo.depth--;                             
+  {                       
     /* Disable the interrupt when the FIFO is empty */
     if (tx_fifo.depth == 0) {
       USART1->IEN &= ~USART_IEN_TXBL;
@@ -237,7 +240,8 @@ void USART1_TX_IRQHandler(void)
     }
     /* Otherwise transmit the next byte in the FIFO */
     else {
-      USART1->TXDATA = tx_fifo.buffer[tx_fifo.pRead];
+      /* Transmit the byte */
+      USART1->TXDATA = fifo_read(&tx_fifo);
     }
   }
 }  

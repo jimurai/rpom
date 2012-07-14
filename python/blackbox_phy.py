@@ -20,7 +20,7 @@ class BlackBoxStreamParser(object):
 	
 	def read(self):
 		if (self.stream_open == False):
-			print "Stream not open yet."
+			print "Stream not open - read failed."
 			return 1
 		
 		# First check for a header

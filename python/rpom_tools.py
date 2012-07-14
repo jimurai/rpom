@@ -20,15 +20,17 @@ class rpomSerialThread(threading.Thread):
 		self.queue = data_queue		
 		# Set up threading
 		self.enabled = threading.Event()
+		self.running = threading.Event()
 		
 	def run(self):
 		# Open the serial port
 		self.serial_stream.open()
 		# Enable continuous sampling of serial port
 		self.enabled.set()
+		self.running.set()
 		
 		# If the RPOM needs any START commands put them here
-		self.serial_stream.stream.write(bytearray([0x07]))
+		self.serial_stream.stream.write(bytearray([0x00,0x00,0x06,0x00,0x07,0x00]))
 		
 		# Start collecting data and put it in a queue
 		_index = 0
@@ -64,12 +66,15 @@ class rpomSerialThread(threading.Thread):
 							self.queue.put(_working_packet)
 							_working_packet = RPOM_Packet()
 							_index = 0
+		self.running.clear()
 			
 	def join(self, timeout=None):
 		# If the RPOM needs any STOP commands put them here
-		self.serial_stream.stream.write(bytearray([0x00]))
+		self.serial_stream.stream.write(bytearray([0x00,0x00,0x06,0x00,0x00,0x00]))
 		# Cause the run() loop to complete and stop the thread
-		self.enabled.clear
+		self.enabled.clear()
+		# Wait before closing the port
+		while self.running.isSet():pass
 		self.serial_stream.close()
 		threading.Thread.join(self, timeout)
 
