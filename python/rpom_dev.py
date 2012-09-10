@@ -13,9 +13,12 @@ from scipy import fftpack
 import pyqtgraph as pg
 import rpom_tools
 
+import h5py
+
 class rpomUI(QtGui.QMainWindow):
 	PLOTDEPTH = 1024*3
 	QUEUEDEPTH = 500
+	WORKING_ARRAY_DEPTH = 256
 	Ts = 2*16.0/32768.0
 	def __init__(self, parent=None):
 		# Grab arguments
@@ -57,11 +60,19 @@ class rpomUI(QtGui.QMainWindow):
 		self.stream = None
 		self.streaming = False
 		
+		# DAQ variables
+		self.recording = False
+		self.datacounter = 0
+		
 		# Keyboard controls 
 		# Toggle RPOM state
 		self.stream_action = QtGui.QShortcut(self)
 		self.stream_action.setKey("Space")
 		self.connect(self.stream_action, QtCore.SIGNAL("activated()"), self.toggle_stream)
+		# Toggle DAQ state
+		self.daq_action = QtGui.QShortcut(self)
+		self.daq_action.setKey("#")
+		self.connect(self.daq_action, QtCore.SIGNAL("activated()"), self.toggle_daq)
 
 		# Initialize plot data
 		self.t = np.arange(self.PLOTDEPTH)*self.Ts
@@ -81,11 +92,11 @@ class rpomUI(QtGui.QMainWindow):
 		fred = np.abs(fftpack.fft(self.window*self.red[-self.Mn:]))
 		
 		# Redraw the raw plots
-		self.curveIR.updateData(self.ir,x=self.t)
-		self.curveRED.updateData(self.red,x=self.t+self.Ts/2)
+		self.curveIR.setData(self.ir,x=self.t)
+		self.curveRED.setData(self.red,x=self.t+self.Ts/2)
 		# Redraw the Fourier plots
-		self.curveIRfreq.updateData(20.0*np.log10(fir[1:self.Mn]),x=self.f[1:])
-		self.curveREDfreq.updateData(20.0*np.log10(fred[1:self.Mn]),x=self.f[1:])
+		self.curveIRfreq.setData(20.0*np.log10(fir[1:self.Mn]),x=self.f[1:])
+		self.curveREDfreq.setData(20.0*np.log10(fred[1:self.Mn]),x=self.f[1:])
 	
 	def getPacket(self):
 		while not self.queue.empty():
@@ -104,6 +115,9 @@ class rpomUI(QtGui.QMainWindow):
 				self.ir[-n:] = temp.ir
 				self.red[:-n] = self.red[n:]
 				self.red[-n:] = temp.red
+				# Store the data if needbe
+				if self.recording:
+					pass
 				# stdout a message in the queue starts getting arbitrarily deep
 				if self.queue.qsize() >= 50:
 					print "WARNING! Queue depth large: ", self.data_q.qsize()
@@ -138,39 +152,84 @@ class rpomUI(QtGui.QMainWindow):
 			# Start streaming data
 			self.start_stream()
 			self.streaming = True
+
+	def start_recording(self):
+		self.streaming_text.setText("Recording live RPOM data")
+		# Open data storage (HDF5)
+		self.storage = h5py.File('rpom_data.hdf5')
+		_expname = 'v3data'
+		if  _expname in list(self.storage):
+			data_grp = self.storage[_expname]
+		else:
+			data_grp = self.storage.create_group(_expname)
+		fname = time.strftime("%Y%m%d_%H%M_%S", time.localtime())
+		self.dataset = data_grp.create_dataset(fname,(self.WORKING_ARRAY_DEPTH,2),'i',chunks=True, maxshape=(None, 6))
+		self.rawset = np.zeros((self.WORKING_ARRAY_DEPTH,2),dtype=np.int32)
+		self.datacounter = 0
+
+	def stop_recording(self):
+		# Check final data length
+		_flen = len(self.dataset) - (self.WORKING_ARRAY_DEPTH-self.datacounter)
+		if _flen < len(self.dataset):
+			# Set final file size
+			self.dataset.resize((_flen,2))
+			# Store working data to file
+			self.dataset[-self.datacounter:] = self.rawset[:self.datacounter]
+		# Close data file
+		self.storage.close()
+		self.streaming_text.setText("Streaming live RPOM data")
+
+	def toggle_daq(self):
+		if self.streaming:
+			if self.recording:
+				# Stop recording
+				self.stop_recording()
+				# Set all flags false
+				self.recording = False
+			else:
+				# Start recording
+				self.start_recording()
+				self.recording = True
 		
 	def create_main_frame(self):	
-		# Create time series plot
-		self.time_plot = pg.PlotWidget(name='TimePlot')
+		# Create time series plots
+		self.ir_plot = pg.PlotWidget(name='IRPlot')
+		self.red_plot = pg.PlotWidget(name='RedPlot')
+		self.diff_plot = pg.PlotWidget(name='DiffPlot')	
 		# Create frequency domain plot
-		self.freq_plot = pg.PlotWidget(name='FreqPlot')
-		self.freq_h_plot = pg.PlotWidget(name='FreqHPlot')		
+		self.freq_plot = pg.PlotWidget(name='FreqPlot')	
 		
 		# Create time based curves
-		self.curveIR = self.time_plot.plot()
+		self.curveIR = self.ir_plot.plot()
 		self.curveIR.setPen("w")
-		self.curveRED = self.time_plot.plot()
+		self.curveRED = self.red_plot.plot()
 		self.curveRED.setPen("r")
+		self.curveDIR = self.diff_plot.plot()
+		self.curveDIR.setPen("w")
+		self.curveDRED = self.diff_plot.plot()
+		self.curveDRED.setPen("r")
 		# Create frequency curves
 		self.curveIRfreq = self.freq_plot.plot()
 		self.curveIRfreq.setPen("w")
 		self.curveREDfreq = self.freq_plot.plot()
 		self.curveREDfreq.setPen("r")
 		# Create envelope curves
-		self.curveIRpeak = self.time_plot.plot()
+		self.curveIRpeak = self.ir_plot.plot()
 		self.curveIRpeak.setPen("g")
-		self.curveIRtrough = self.time_plot.plot()
+		self.curveIRtrough = self.ir_plot.plot()
 		self.curveIRtrough.setPen("b")
-		self.curveREDpeak = self.time_plot.plot()
+		self.curveREDpeak = self.red_plot.plot()
 		self.curveREDpeak.setPen("g")
-		self.curveREDtrough = self.time_plot.plot()
+		self.curveREDtrough = self.red_plot.plot()
 		self.curveREDtrough.setPen("b")
 		
 		# Create the main frame and add plot and port widgets
 		self.main_frame = QtGui.QWidget()
 		main_layout = QtGui.QGridLayout()
-		main_layout.addWidget(self.time_plot,0,0)
+		main_layout.addWidget(self.ir_plot,0,0)
+		main_layout.addWidget(self.red_plot,0,1)
 		main_layout.addWidget(self.freq_plot,1,0)
+		main_layout.addWidget(self.diff_plot,1,1)
 				
 		# Instantiate the main window from the main frame layout
 		self.main_frame.setLayout(main_layout)

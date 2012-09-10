@@ -31,14 +31,20 @@
 /* State variables */
 uint8_t channel, adc_channel;
 /* System settings */
-int system_mode = 0;
 #define NCHANNELS 2
 struct rpom_system_s {
-  int16_t   system_mode;
+  uint16_t  mode;
   uint16_t  led_current[NCHANNELS];
-  uint32_t  pd_thresh[NCHANNELS*2];
   LWDF_ALPHA filter_alphas[LWDF_MAX_ORDER];
   uint8_t filter_types[LWDF_MAX_ORDER];
+  uint32_t  pd_thresh[NCHANNELS*2];
+};
+struct rpom_system_s rpom = {
+  0,
+  {2000,250},
+  {1804,2847,25,1073,24},
+  {0,3,0,3,0},
+  {1<<16,1<<8,1<<16,1<<8}
 };
 /* Homodyne detection variables */
 HOMODYNE_CHANNEL channels[NCHANNELS];
@@ -61,9 +67,9 @@ void enter_reset_state(void) {
   channel = 0;
   LEDS_OFF();
   xDAC_write((3 << 3) | (1 << 0), XDAC_RST, true);
-  system_mode = 0;
-  hd_reset(&channels[0],MID_RANGE);
-  hd_reset(&channels[1],MID_RANGE);
+  rpom.mode = 0;
+  hd_reset(&channels[0],0);
+  hd_reset(&channels[1],0);
 }
 
 /**************************************************************************//**
@@ -92,10 +98,10 @@ int main(void)
     channels[_i].local_osc.phase_offset = 0;
     channels[_i].filter.order = FILTER_ORDER;
     for (_j=0;_j<FILTER_ORDER;_j++) {
-      channels[_i].filter.alphas[_j] = hd_alphas[_j];
-      channels[_i].filter.types[_j] = hd_types[_j];
+      channels[_i].filter.alphas[_j] = rpom.filter_alphas[_j];
+      channels[_i].filter.types[_j] = rpom.filter_types[_j];
     }
-    ppgd_init(&delineator[_i],1<<16,1<<16);
+    ppgd_init(&delineator[_i],rpom.pd_thresh[0],rpom.pd_thresh[1]);
   }
   // Make channel 0 orthogonal to channel 1 (pi/2 offset)
   channels[1].local_osc.phase_offset = 1;
@@ -141,12 +147,53 @@ int main(void)
   while (1) {
     /* Process any characters received on the UART */
     if (message_parser(&rx_fifo,&rx_message)) {
+      uint8_t order;
       switch(rx_message->header.type) {
       case 0x00:    // System state
         if (rx_message->payload[0]==0)
           enter_reset_state();
         else
-          system_mode = rx_message->payload[0];
+          rpom.mode = rx_message->payload[0];
+        break;
+      case 0x01:    // LED brightnesses
+        rpom.led_current[0] = (rx_message->payload[0]<<8) + rx_message->payload[1];
+        rpom.led_current[1] = (rx_message->payload[2]<<8) + rx_message->payload[3];
+        break;
+      case 0x02:    // Filter adaptor coefficients
+        /* Calculate the filter order */
+        order = (rx_message->header.length - sizeof(rx_message->header))>>2;
+        for (_i=0;_i<order;_i++) {
+          /* Extract the adaptor coefficients */
+          rpom.filter_alphas[_i] = (rx_message->payload[(_i<<1)]<<8) + rx_message->payload[(_i<<1)+1];
+          /* Reload the internal adaptor coefficients */
+          for (_j=0;_j<2;_j++) {
+            channels[_i].filter.alphas[_j] = rpom.filter_alphas[_j];
+          }
+        }
+        break;
+      case 0x03:    // Filter adaptor types
+        /* Calculate the filter order */
+        order = (rx_message->header.length - sizeof(rx_message->header))>>2;
+        for (_i=0;_i<order;_i++) {
+          /* Extract the adaptor types */
+          rpom.filter_types[_i] = rx_message->payload[_i];
+          /* Reload the internal adaptor types */
+          for (_j=0;_j<2;_j++) {
+            channels[_i].filter.types[_j] = rpom.filter_types[_j];
+          }
+        }
+        break;
+      case 0x04:    // Quadrature delineation thresholds
+        /* Calculate the filter order */
+        for (_i=0;_i<4;_i++) {
+          /* Extract the adaptor types - big endian */
+          _j = _i<<2;
+          /* Extract the thresholds */
+          rpom.pd_thresh[_i] =  rx_message->payload[_j]<<24   + rx_message->payload[_j+1]<<16 +
+                                rx_message->payload[_j+2]<<8  + rx_message->payload[_j+3];
+          /* Copy the thresholds into the delineator */
+          delineator[_i>>1].delineator.delta[_i&0x01] = rpom.pd_thresh[_i];
+        }
         break;
       default:
         break;
@@ -157,7 +204,7 @@ int main(void)
     for (_i=0;_i<2;_i++) {
       if (channels[_i].adc_waiting) {
         /* DC current rejection ? */
-        if (system_mode&(1<<1)) {
+        if (rpom.mode&(1<<1)) {
           /* Perform DC current rejection */
           _error = (int32_t)channels[_i].adc_hold - MID_RANGE;
           /* Implement any required gain */
@@ -174,7 +221,7 @@ int main(void)
         }
         
         /* Homodyne? */
-        if (system_mode&(1<<2)) {
+        if (rpom.mode&(1<<2)) {
           /* Perform homodyne detection on raw ADC value */
           measurement = hd_adc_process(&channels[_i])<<6;
         }
@@ -185,7 +232,7 @@ int main(void)
         }
         
         /* Delineate? */
-        if (system_mode&(1<<3)) {
+        if (rpom.mode&(1<<3)) {
           ppgd_write(&delineator[_i], measurement);
         }
         else {
@@ -255,7 +302,7 @@ void LETIMER0_IRQHandler(void)
   uint32_t flags = LETIMER_IntGet(LETIMER0);
   
   if (flags& LETIMER_IF_UF) {
-    if (system_mode) {
+    if (rpom.mode) {
       /* Trigger ADC conversion and enable interrupt*/    
       adc_channel = channel;
       ADC_Start(ADC0, adcStartSingle);       
@@ -275,7 +322,7 @@ void LETIMER0_IRQHandler(void)
         LED0_OFF();              
         /* Prep for LED1(IR) channel */
         channel = 1;
-        iDAC_write(250);
+        iDAC_write(rpom.led_current[1]);
         /* Turn on LED immediate if in phase 2 */
         if (channels[1].led_phase==2) LED1_ON();
       }
@@ -283,7 +330,7 @@ void LETIMER0_IRQHandler(void)
         LED1_OFF();     
         /* Prep for LED0(RED) channel */
         channel = 0;
-        iDAC_write(2000);
+        iDAC_write(rpom.led_current[0]);
         /* Turn on LED immediate if in phase 2 */
         if (channels[0].led_phase==2) LED0_ON(); 
   
@@ -294,7 +341,7 @@ void LETIMER0_IRQHandler(void)
   }                                                     
   
   if (flags& LETIMER_IF_COMP1) {
-    if (system_mode) {
+    if (rpom.mode) {
       if ((channel==0) && (channels[0].led_phase&0x01))
         LED0_ON();
       else if ((channel==1) && (channels[1].led_phase&0x01))
@@ -319,7 +366,7 @@ void ADC0_IRQHandler(void)
   /* Read conversion result to clear Single Data Valid flag */
   uint32_t adcResult = ADC_DataSingleGet(ADC0);
   /* Store the value for subsequent processing */
-  hd_adc_hold(&channels[adc_channel], (int16_t)(adcResult));
+  hd_adc_hold(&channels[adc_channel], (int16_t)adcResult);
   /* Disable interrupt */
   ADC0->IEN &= ~(ADC_IEN_SINGLE);
   NVIC_DisableIRQ(ADC0_IRQn);

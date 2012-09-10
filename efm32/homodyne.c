@@ -43,7 +43,7 @@ int32_t hd_adc_process(HOMODYNE_CHANNEL* hd) {
   /* Local variables */
   int16_t mix_output;
   /* Mix the input with the local oscillator */
-  mix_output = hd->local_osc.local_osc[hd->adc_phase]*hd->adc_hold;
+  mix_output = hd->local_osc.local_osc[hd->adc_phase]*(hd->adc_hold-(1<<(12-1)));
   /* Filter the signal */
   lwdf_write(&(hd->filter),mix_output);
   /* Signal that processing is finished */

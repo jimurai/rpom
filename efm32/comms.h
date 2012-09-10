@@ -14,7 +14,7 @@ extern "C" {
 #include <stdint.h>
 #include <stdbool.h>
 
-#define MAX_FIFO_DEPTH 32
+#define MAX_FIFO_DEPTH 64
 typedef struct { 
   uint8_t pRead;  
   uint8_t pWrite;
@@ -22,7 +22,7 @@ typedef struct {
   uint8_t buffer[MAX_FIFO_DEPTH];
 } char_fifo_t;
   
-#define MAX_MESSAGE_LEN 32
+#define MAX_MESSAGE_LEN 64
 typedef struct {
    uint8_t id;  
    uint8_t type;
