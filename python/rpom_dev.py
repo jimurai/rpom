@@ -4,7 +4,6 @@ import Queue
 import threading
 import os
 import getopt
-import csv
 import time
 
 from PyQt4 import QtCore, QtGui
@@ -16,7 +15,7 @@ import rpom_tools
 import h5py
 
 class rpomUI(QtGui.QMainWindow):
-	PLOTDEPTH = 1024*3
+	PLOTDEPTH = 1024*5
 	QUEUEDEPTH = 500
 	WORKING_ARRAY_DEPTH = 256
 	Ts = 2*16.0/32768.0
@@ -93,10 +92,13 @@ class rpomUI(QtGui.QMainWindow):
 		
 		# Redraw the raw plots
 		self.curveIR.setData(self.ir,x=self.t)
+		self.ir_plot.setYRange(np.amin(self.ir),np.amax(self.ir))
 		self.curveRED.setData(self.red,x=self.t+self.Ts/2)
+		self.red_plot.setYRange(np.amin(self.red),np.amax(self.red))
 		# Redraw the Fourier plots
-		self.curveIRfreq.setData(20.0*np.log10(fir[1:self.Mn]),x=self.f[1:])
-		self.curveREDfreq.setData(20.0*np.log10(fred[1:self.Mn]),x=self.f[1:])
+		_fr = np.nonzero((self.f>1)*(self.f<500))
+		self.curveIRfreq.setData(20.0*np.log10(fir[_fr]),x=self.f[_fr])
+		self.curveREDfreq.setData(20.0*np.log10(fred[_fr]),x=self.f[_fr])
 	
 	def getPacket(self):
 		while not self.queue.empty():
@@ -117,7 +119,21 @@ class rpomUI(QtGui.QMainWindow):
 				self.red[-n:] = temp.red
 				# Store the data if needbe
 				if self.recording:
-					pass
+					# Store new raw data
+					_Nr = np.arange(n) + self.datacounter
+					# Check if time to copy to file
+					if _Nr[-1] >= self.WORKING_ARRAY_DEPTH:
+						# Store working data to file
+						self.dataset[-self.WORKING_ARRAY_DEPTH:] = self.rawset[:]
+						# Make enough space for next batch of data
+						self.dataset.resize((len(self.dataset)+self.WORKING_ARRAY_DEPTH,2))
+						# Reset counters
+						self.datacounter = 0
+						_Nr -= self.WORKING_ARRAY_DEPTH
+					# Store data locally
+					self.rawset[_Nr,0] = temp.ir
+					self.rawset[_Nr,1] = temp.red
+					self.datacounter += n
 				# stdout a message in the queue starts getting arbitrarily deep
 				if self.queue.qsize() >= 50:
 					print "WARNING! Queue depth large: ", self.data_q.qsize()
@@ -163,7 +179,11 @@ class rpomUI(QtGui.QMainWindow):
 		else:
 			data_grp = self.storage.create_group(_expname)
 		fname = time.strftime("%Y%m%d_%H%M_%S", time.localtime())
-		self.dataset = data_grp.create_dataset(fname,(self.WORKING_ARRAY_DEPTH,2),'i',chunks=True, maxshape=(None, 6))
+		self.dataset = data_grp.create_dataset(	fname,\
+												(self.WORKING_ARRAY_DEPTH,2),\
+												'i',\
+												chunks=True,\
+												maxshape=(None, 6))
 		self.rawset = np.zeros((self.WORKING_ARRAY_DEPTH,2),dtype=np.int32)
 		self.datacounter = 0
 

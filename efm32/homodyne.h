@@ -32,7 +32,7 @@ typedef struct hd_local_oscillator {
 typedef struct homodyne_channel {
 	uint8_t   led_phase;
 	uint8_t   adc_phase;
-  uint16_t   adc_hold;
+  int16_t   adc_hold;
   bool      adc_waiting;
   HD_LO     local_osc;
 	LWDF_FILTER   filter;

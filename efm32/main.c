@@ -75,11 +75,11 @@ void enter_reset_state(void) {
 /**************************************************************************//**
  * @brief  Main function
  *****************************************************************************/
+int32_t dcr_integration[2] = {0,0};
 int main(void)
 {
   /* Local variables */
   int32_t measurement,_i,_j,_error;
-  static int32_t dcr_integration = 0;
   
   // Note that the chip resets to using the HFRCO at 14MHz
   /* Chip errata */
@@ -105,8 +105,8 @@ int main(void)
   }
   // Make channel 0 orthogonal to channel 1 (pi/2 offset)
   channels[1].local_osc.phase_offset = 1;
-  hd_reset(&channels[0],MID_RANGE);
-  hd_reset(&channels[1],MID_RANGE);
+  hd_reset(&channels[0],0);
+  hd_reset(&channels[1],0);
   
   /* Manually initialise the FIFOs */
   tx_fifo.depth = 0;
@@ -206,23 +206,22 @@ int main(void)
         /* DC current rejection ? */
         if (rpom.mode&(1<<1)) {
           /* Perform DC current rejection */
-          _error = (int32_t)channels[_i].adc_hold - MID_RANGE;
+          channels[_i].adc_hold -= MID_RANGE;
           /* Implement any required gain */
-          dcr_integration += (_error+(1<<4))>>5;
+          dcr_integration[_i] += (channels[_i].adc_hold+(1<<2))>>3;
           /* Bound the integration to limits of the external DAC */
-          if (dcr_integration>XDAC_LIMIT) {
-            dcr_integration = XDAC_LIMIT;
+          if (dcr_integration[_i]>XDAC_LIMIT) {
+            dcr_integration[_i] = XDAC_LIMIT;
           }
-          else if (dcr_integration<0) {
-            dcr_integration = 0;
+          else if (dcr_integration[_i]<0) {
+            dcr_integration[_i] = 0;
           }            
-          /* Set the current feedbakc according to integrator */
-          xDAC_write((3 << 3) | (1 << 0), dcr_integration, true);
         }
         
         /* Homodyne? */
         if (rpom.mode&(1<<2)) {
           /* Perform homodyne detection on raw ADC value */
+          // Includes intrinsic gain of 64
           measurement = hd_adc_process(&channels[_i])<<6;
         }
         else {
@@ -332,9 +331,10 @@ void LETIMER0_IRQHandler(void)
         channel = 0;
         iDAC_write(rpom.led_current[0]);
         /* Turn on LED immediate if in phase 2 */
-        if (channels[0].led_phase==2) LED0_ON(); 
-  
+        if (channels[0].led_phase==2) LED0_ON();   
       }
+      /* Set the current feedback according to integrator */
+      xDAC_write((3 << 3) | (1 << 0), dcr_integration[channel], true);
     }
     /* Clear interrupt flag manually */
     LETIMER_IntClear(LETIMER0, LETIMER_IF_UF);
